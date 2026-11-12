@@ -155,12 +155,13 @@ def _scan_chunk(task):
 _KEYCHAIN_CACHE = {}
 
 def get_key(name):
-    # Reads an API key from the macOS Keychain at call time (h8mail service
-    # items). The value is never printed, logged, or written to disk.
+    # Reads an API key from the macOS Keychain at call time (items stored
+    # under the 'leaksearch' service name). The value is never printed,
+    # logged, or written to disk.
     if name not in _KEYCHAIN_CACHE:
         try:
             result = subprocess.run(
-                ["security", "find-generic-password", "-a", name, "-s", "h8mail", "-w"],
+                ["security", "find-generic-password", "-a", name, "-s", "leaksearch", "-w"],
                 capture_output=True, text=True, timeout=10)
             _KEYCHAIN_CACHE[name] = result.stdout.strip() if result.returncode == 0 else None
         except Exception:
@@ -169,7 +170,7 @@ def get_key(name):
 
 def key_missing(name):
     print(colored(f"[!] Keychain item '{name}' not found. Add it with:\n"
-                  f"    security add-generic-password -a {name} -s h8mail -w\n", "red"))
+                  f"    security add-generic-password -a {name} -s leaksearch -w\n", "red"))
 
 def find_leaks_hunterio(keyword, proxy, number):
     api_key = get_key("hunterio")
