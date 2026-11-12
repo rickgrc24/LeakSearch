@@ -34,9 +34,8 @@ usage: LeakSearch.py [-h] [-d DATABASE] [-k KEYWORD] [-n NUMBER] [-o OUTPUT] [-p
 options:
   -h, --help            show this help message and exit
   -d DATABASE, --database DATABASE
-                        Online source (proxynova, hibp, pwndb, hunterio, all or
-                        comma-separated list) or a local file (text or JSON) to
-                        scan
+                        Online source (proxynova) or a local file (text or
+                        JSON) to scan
   -k KEYWORD, --keyword KEYWORD
                         Keyword (user/domain/pass) to search for leaks in the DB
   -n NUMBER, --number NUMBER
@@ -44,9 +43,29 @@ options:
   -o OUTPUT, --output OUTPUT
                         Save the results as json or txt into a file
   -p PROXY, --proxy PROXY
-                        Set HTTP/S or SOCKS5 proxy (like http://localhost:8080 or
-                        socks5h://127.0.0.1:9050, needed for pwndb)
+                        Set HTTP/S or SOCKS5 proxy (like http://localhost:8080)
 
+```
+
+### Results
+
+Every result contains an email (or username) and an **uncensored password in
+plaintext**. ProxyNova COMB records hold only the credential pair, so no
+breach site name or leak date is available for them; local database files
+return whatever columns the file itself contains.
+
+### Notes on removed sources
+
+Other leak-search services were evaluated and removed because none of their
+routes (web or API) return uncensored credentials without a paid
+subscription: BreachDirectory, DeHashed, Leak-Lookup, IntelX, Snusbase,
+HIBP (counts only, no credentials) and pwndb (its onion service is offline
+and its v2 address is unsupported by current Tor). Optional API keys can be
+stored in the macOS Keychain under the `leaksearch` service name and are
+read at call time, never written to disk:
+
+```
+security add-generic-password -a <keyname> -s leaksearch -w '<value>'
 ```
 
 ### The detailed guide of use can be found at the following link:
