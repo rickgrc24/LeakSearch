@@ -11,6 +11,8 @@ import hashlib
 import urllib3
 import requests
 import argparse
+import subprocess
+from urllib.parse import quote
 from concurrent.futures import ProcessPoolExecutor
 from tabulate import tabulate
 from neotermcolor import colored
@@ -29,25 +31,34 @@ banner2 = r"""
   """
 
 def find_leaks_proxynova(email, proxy, number):
-    url = f"https://api.proxynova.com/comb?query={email}"
-    headers = {'User-Agent': 'curl'}
+    # Endpoint verified from proxynova.com's own frontend:
+    # GET https://api.proxynova.com/comb?query=<term>&start=<offset>&limit=<n>
+    # (limit maxes at 100 per request; results are paged via start).
     session = requests.session()
-
     if proxy:
         session.proxies = {'http': proxy, 'https': proxy}
 
-    response = session.get(url, headers=headers, verify=False)
-
-    if response.status_code == 200:
-        data = json.loads(response.text)
-        total_results = data.get("count", 0)
-        print(colored(f"[*] Found {total_results} different records in database", "magenta"), end='')
-
-        lines = data.get("lines", [])[:number]
-        return lines
-    else:
-        print(colored(f"[!] Failed to fetch results from ProxyNova. Status code: {response.status_code}\n", "red"))
-        return []
+    headers = {'User-Agent': 'curl'}
+    lines, start = [], 0
+    total_results = None
+    while len(lines) < number:
+        limit = min(number - len(lines), 100)
+        url = f"https://api.proxynova.com/comb?query={email}&start={start}&limit={limit}"
+        response = session.get(url, headers=headers, verify=False)
+        if response.status_code != 200:
+            if start == 0:
+                print(colored(f"[!] Failed to fetch results from ProxyNova. Status code: {response.status_code}\n", "red"))
+            break
+        data = response.json()
+        if total_results is None:
+            total_results = data.get("count", 0)
+            print(colored(f"[*] Found {total_results} different records in database", "magenta"), end='')
+        page_lines = data.get("lines", [])
+        if not page_lines:
+            break
+        lines.extend(page_lines)
+        start += len(page_lines)
+    return lines[:number]
 
 def find_leaks_hibp(keyword, proxy, number):
     # HaveIBeenPwned Pwned Passwords API (free, keyless): checks how many
@@ -141,6 +152,44 @@ def _scan_chunk(task):
             matches.append(line.decode("utf-8", "ignore").strip())
     return matches
 
+_KEYCHAIN_CACHE = {}
+
+def get_key(name):
+    # Reads an API key from the macOS Keychain at call time (h8mail service
+    # items). The value is never printed, logged, or written to disk.
+    if name not in _KEYCHAIN_CACHE:
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-a", name, "-s", "h8mail", "-w"],
+                capture_output=True, text=True, timeout=10)
+            _KEYCHAIN_CACHE[name] = result.stdout.strip() if result.returncode == 0 else None
+        except Exception:
+            _KEYCHAIN_CACHE[name] = None
+    return _KEYCHAIN_CACHE[name]
+
+def key_missing(name):
+    print(colored(f"[!] Keychain item '{name}' not found. Add it with:\n"
+                  f"    security add-generic-password -a {name} -s h8mail -w\n", "red"))
+
+def find_leaks_hunterio(keyword, proxy, number):
+    api_key = get_key("hunterio")
+    if not api_key:
+        key_missing("hunterio")
+        return []
+
+    domain = keyword.split('@', 1)[1] if '@' in keyword else keyword
+    url = f"https://api.hunter.io/v2/domain-search?domain={domain}&limit={min(number, 100)}"
+    response = requests.get(url, timeout=20, headers={"X-API-KEY": api_key},
+                            proxies={'http': proxy, 'https': proxy} if proxy else None)
+
+    if response.status_code != 200:
+        print(colored(f"[!] Failed to fetch results from hunter.io. Status code: {response.status_code}\n", "red"))
+        return []
+
+    emails = response.json().get("data", {}).get("emails", []) or []
+    return [f"{entry.get('value', '')}:related email, no password data" for entry in emails if entry.get('value')]
+
+
 def find_leaks_local_db(database, keyword, number):
     if not os.path.exists(database):
         print(colored(f"[!] Local database file not found: {database}\n", "red"))
@@ -200,6 +249,7 @@ ONLINE_SOURCES = {
     'proxynova': find_leaks_proxynova,
     'hibp': find_leaks_hibp,
     'pwndb': find_leaks_pwndb,
+    'hunterio': find_leaks_hunterio,
 }
 
 def main(database, keyword, output=None, proxy=None, number=20):
@@ -267,7 +317,7 @@ if __name__ == '__main__':
     print(colored(banner, "blue"))
     print(colored(banner2, "green"))
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova, hibp, pwndb, all or comma-separated list) or local file")
+    parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova, hibp, pwndb, hunterio, all or comma-separated list) or local file")
     parser.add_argument("-k", "--keyword", help="Keyword (user/domain/pass) to search for leaks in the DB")
     parser.add_argument("-n", "--number", type=int, default=20, help="Number of results to show (default is 20)")
     parser.add_argument("-o", "--output", help="Save the results as json or txt into a file")

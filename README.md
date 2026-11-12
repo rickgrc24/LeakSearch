@@ -34,8 +34,9 @@ usage: LeakSearch.py [-h] [-d DATABASE] [-k KEYWORD] [-n NUMBER] [-o OUTPUT] [-p
 options:
   -h, --help            show this help message and exit
   -d DATABASE, --database DATABASE
-                        Online source (proxynova, hibp, pwndb, all or comma-separated
-                        list) or a local file (text or JSON) to scan
+                        Online source (proxynova, hibp, pwndb, hunterio, all or
+                        comma-separated list) or a local file (text or JSON) to
+                        scan
   -k KEYWORD, --keyword KEYWORD
                         Keyword (user/domain/pass) to search for leaks in the DB
   -n NUMBER, --number NUMBER
