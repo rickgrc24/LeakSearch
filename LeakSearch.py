@@ -5,7 +5,9 @@
 #============================#
 
 import os
+import re
 import json
+import hashlib
 import urllib3
 import requests
 import argparse
@@ -46,6 +48,71 @@ def find_leaks_proxynova(email, proxy, number):
     else:
         print(colored(f"[!] Failed to fetch results from ProxyNova. Status code: {response.status_code}\n", "red"))
         return []
+
+def find_leaks_hibp(keyword, proxy, number):
+    # HaveIBeenPwned Pwned Passwords API (free, keyless): checks how many
+    # times the keyword (treated as a password) appears in known breaches
+    # using k-anonymity (only the SHA-1 prefix is sent to the server)
+    digest = hashlib.sha1(keyword.encode('utf-8')).hexdigest().upper()
+    url = "https://api.pwnedpasswords.com/range/" + digest[:5]
+    session = requests.session()
+
+    if proxy:
+        session.proxies = {'http': proxy, 'https': proxy}
+
+    response = session.get(url, timeout=15)
+
+    if response.status_code != 200:
+        print(colored(f"[!] Failed to fetch results from HIBP. Status code: {response.status_code}\n", "red"))
+        return []
+
+    for line in response.text.splitlines():
+        hash_suffix, _, count = line.partition(":")
+        if hash_suffix.strip() == digest[5:]:
+            count = int(count)
+            break
+    else:
+        count = 0
+
+    return [f"{keyword}@hibp:{count} times in known breaches"]
+
+def find_leaks_pwndb(keyword, proxy, number):
+    # pwndb (free, keyless): plaintext email:password leaks on a Tor onion
+    # service. Requires a Tor SOCKS proxy, like -p socks5h://127.0.0.1:9050
+    if not proxy:
+        print(colored("[!] pwndb runs on a Tor onion service: you need a Tor SOCKS proxy (like -p socks5h://127.0.0.1:9050)\n", "red"))
+        return []
+
+    if '@' in keyword:
+        luser, domaim = keyword.split('@', 1)
+    elif keyword.startswith('@'):
+        luser, domaim = '%', keyword[1:] # all users on that domain
+    else:
+        luser, domaim = keyword, '%' # match any domain
+
+    url = "http://pwndb2am4tzkvold.onion/"
+    session = requests.session()
+    session.proxies = {'http': proxy, 'https': proxy}
+
+    response = session.post(url, data={'luser': luser, 'domaim': domaim, 'submit': 'submit'}, timeout=60)
+
+    if response.status_code != 200:
+        print(colored(f"[!] Failed to fetch results from pwndb. Status code: {response.status_code}\n", "red"))
+        return []
+
+    text = re.sub(r'<[^>]*>', '', response.text) # strip any SOAP/XML wrapping
+    pairs = re.findall(r"\[(luser|domaim|password)\] => (.*)", text)
+
+    results = []
+    for index in range(0, len(pairs) - 2, 3):
+        if pairs[index][0] == 'luser' and pairs[index + 1][0] == 'domaim' and pairs[index + 2][0] == 'password':
+            user, domain, password = (value.strip() for _, value in pairs[index:index + 3])
+            results.append(f"{user}@{domain}:{password}")
+
+            if len(results) >= number:
+                break
+
+    return results
 
 def _scan_chunk(task):
     """Scan one byte range of a text database for keyword matches (worker)."""
@@ -129,18 +196,47 @@ def find_leaks_local_db(database, keyword, number):
 
     return results[:number] if number is not None else results
 
+ONLINE_SOURCES = {
+    'proxynova': find_leaks_proxynova,
+    'hibp': find_leaks_hibp,
+    'pwndb': find_leaks_pwndb,
+}
+
 def main(database, keyword, output=None, proxy=None, number=20):
-    print(colored(f"[>] Searching for {keyword} leaks in {database}..", "yellow"))
+    keyword = keyword.strip()
 
-    if database.lower() == "proxynova":
-        results = find_leaks_proxynova(keyword.strip(), proxy, number)
-    else:
-        results = find_leaks_local_db(database.strip(), keyword.strip(), number)
+    if database.lower() in ONLINE_SOURCES or database.lower() == 'all' or ',' in database:
+        if database.lower() == 'all':
+            sources = list(ONLINE_SOURCES)
+        else:
+            sources = [name.strip().lower() for name in database.split(',')]
 
-    if not results:
-        print(colored(f"\n[!] No leaks found in {database}!\n", "red"))
+        unknown = [name for name in sources if name not in ONLINE_SOURCES]
+        if unknown:
+            print(colored(f"[!] Unknown online source(s): {', '.join(unknown)}\n    Available: {', '.join(ONLINE_SOURCES)}\n", "red"))
+            exit(-1)
+
+        results = []
+        for name in sources:
+            print(colored(f"[>] Searching for {keyword} leaks in {name}..", "yellow"))
+            try:
+                results.extend(ONLINE_SOURCES[name](keyword, proxy, number))
+            except Exception as e:
+                print(colored(f"[!] Error searching {name}: {e}\n", "red"))
+
+        if not results:
+            print(colored(f"\n[!] No leaks found!\n", "red"))
+        else:
+            print_results(results, output, number)
+
     else:
-        print_results(results, output, number)
+        print(colored(f"[>] Searching for {keyword} leaks in {database}..", "yellow"))
+        results = find_leaks_local_db(database.strip(), keyword, number)
+
+        if not results:
+            print(colored(f"\n[!] No leaks found in {database}!\n", "red"))
+        else:
+            print_results(results, output, number)
 
 def print_results(results, output, number):
     print(colored(f"\n[-] Selecting the first {len(results)} results..", "blue"))
@@ -171,7 +267,7 @@ if __name__ == '__main__':
     print(colored(banner, "blue"))
     print(colored(banner2, "green"))
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--database", default="ProxyNova", help="Database used for the search (ProxyNova or LocalFile)")
+    parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova, hibp, pwndb, all or comma-separated list) or local file")
     parser.add_argument("-k", "--keyword", help="Keyword (user/domain/pass) to search for leaks in the DB")
     parser.add_argument("-n", "--number", type=int, default=20, help="Number of results to show (default is 20)")
     parser.add_argument("-o", "--output", help="Save the results as json or txt into a file")

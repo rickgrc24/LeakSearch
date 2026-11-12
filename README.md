@@ -34,7 +34,8 @@ usage: LeakSearch.py [-h] [-d DATABASE] [-k KEYWORD] [-n NUMBER] [-o OUTPUT] [-p
 options:
   -h, --help            show this help message and exit
   -d DATABASE, --database DATABASE
-                        Database used for the search (ProxyNova or LocalDataBase)
+                        Online source (proxynova, hibp, pwndb, all or comma-separated
+                        list) or a local file (text or JSON) to scan
   -k KEYWORD, --keyword KEYWORD
                         Keyword (user/domain/pass) to search for leaks in the DB
   -n NUMBER, --number NUMBER
@@ -42,7 +43,8 @@ options:
   -o OUTPUT, --output OUTPUT
                         Save the results as json or txt into a file
   -p PROXY, --proxy PROXY
-                        Set HTTP/S proxy (like http://localhost:8080)
+                        Set HTTP/S or SOCKS5 proxy (like http://localhost:8080 or
+                        socks5h://127.0.0.1:9050, needed for pwndb)
 
 ```
 
