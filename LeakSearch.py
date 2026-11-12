@@ -9,6 +9,7 @@ import json
 import urllib3
 import requests
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 from tabulate import tabulate
 from neotermcolor import colored
 from requests import ConnectionError
@@ -46,6 +47,33 @@ def find_leaks_proxynova(email, proxy, number):
         print(colored(f"[!] Failed to fetch results from ProxyNova. Status code: {response.status_code}\n", "red"))
         return []
 
+def _scan_chunk(task):
+    """Scan one byte range of a text database for keyword matches (worker)."""
+    path, start, end, keyword, file_size = task
+    keyword = keyword.lower().encode("utf-8", "ignore")
+
+    with open(path, 'rb') as f:
+        f.seek(start)
+        data = f.read(end - start)
+
+        # Read through the newline so a line straddling the chunk boundary
+        # is completed here and owned exclusively by this chunk
+        if end != file_size:
+            data += f.readline()
+
+    # Align chunk start to a line boundary (chunk 0 already starts on one)
+    if start != 0:
+        first_line = data.find(b"\n")
+        if first_line == -1:
+            return [] # chunk holds only the tail of a huge line, owned by the previous chunk
+        data = data[first_line + 1:]
+
+    matches = []
+    for line in data.split(b"\n"):
+        if keyword in line.lower():
+            matches.append(line.decode("utf-8", "ignore").strip())
+    return matches
+
 def find_leaks_local_db(database, keyword, number):
     if not os.path.exists(database):
         print(colored(f"[!] Local database file not found: {database}\n", "red"))
@@ -59,37 +87,47 @@ def find_leaks_local_db(database, keyword, number):
             except json.JSONDecodeError:
                 print(colored("[!] Error: Failed to parse local database as JSON\n", "red"))
                 exit(-1)
-    else:
-        file_length = os.path.getsize(database)
-        block_size = 1
-        line_count = 0
-        results = []
+        return lines[:number] if number is not None else lines
 
-        try:
-            with open(database, 'r') as file:
-                while True:
-                    block = [next(file).strip() for _ in range(block_size)]
-                    line_count += len(block)
+    file_size = os.path.getsize(database)
+    if file_size == 0:
+        return []
+    results = []
 
-                    if not block or line_count > file_length:
-                        break
+    # Tune chunking and worker count to this machine's hardware
+    cpu_count = os.cpu_count() or 1
+    chunk_size = 64 * 1024 * 1024 # 64 MiB per task keeps overhead low
+    tasks = [(database, offset, min(offset + chunk_size, file_size), keyword, file_size)
+             for offset in range(0, file_size, chunk_size)]
+    workers = min(cpu_count, len(tasks))
 
-                    filtered_block = [line for line in block if keyword.lower() in line.lower()]
-                    results.extend(filtered_block)
+    executor = None
+    try:
+        if workers <= 1:
+            # Small file: scan it in-process, no pool startup cost
+            results = _scan_chunk(tasks[0])
+        else:
+            done_bytes = 0
+            executor = ProcessPoolExecutor(max_workers=workers)
+            for chunk_results in executor.map(_scan_chunk, tasks):
+                done_bytes += chunk_size
+                percent = min(done_bytes, file_size) * 100 // file_size
+                print(colored(f"\r[*] Reading {file_size // 1048576} MiB in database.. {percent}%", "magenta"), end='', flush=True)
+                results.extend(chunk_results)
 
-                    print(colored(f"\r[*] Reading {line_count} lines in database..", "magenta"), end='', flush=True)
+                if number is not None and len(results) >= number:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+            else:
+                executor.shutdown()
 
-                    if number is not None and len(results) >= number:
-                        break
+    except KeyboardInterrupt:
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        print(colored("\n[!] Exiting..\n", "red"))
+        exit(-1)
 
-        except KeyboardInterrupt:
-            print (colored("\n[!] Exiting..\n", "red"))
-            exit(-1)
-
-        except:
-            pass
-        
-        return results[:number] if number is not None else results
+    return results[:number] if number is not None else results
 
 def main(database, keyword, output=None, proxy=None, number=20):
     print(colored(f"[>] Searching for {keyword} leaks in {database}..", "yellow"))
