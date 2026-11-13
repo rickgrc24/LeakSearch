@@ -34,23 +34,19 @@ banner2 = r"""
 def find_leaks_proxynova(email, proxy, number):
     # Endpoint verified from proxynova.com's own frontend:
     # GET https://api.proxynova.com/comb?query=<term>&start=<offset>&limit=<n>
-    # Server-side rule (verified live): a request only succeeds while
-    # start + limit <= 100 - the API serves at most the first 100 records
-    # of any query ("You are limited to 100 results"), and windows differ
-    # between query variants. To drain more, the email, its local part and
-    # local@domain for every domain seen so far are queried in turn and the
-    # results are merged and de-duplicated.
-    # Endpoint verified from proxynova.com's own frontend:
-    # GET https://api.proxynova.com/comb?query=<term>&start=<offset>&limit=<n>
-    # Server-side rules (verified live): a request only succeeds while
-    # start + limit <= 100, so at most the first 100 records of any query
-    # are served ("You are limited to 100 results"); querying variants of
-    # the same term (full email, local part, local@domain) always returns
-    # the same underlying records, so nothing beyond that window exists on
-    # their side. The email and its local part are queried and merged to
-    # be safe, records are de-duplicated, and only lines containing the
-    # searched local part are kept (the API also returns unrelated fuzzy
-    # matches for a query).
+    # Server-side rules (verified live):
+    #   - a request only succeeds while start + limit <= 100, so at most
+    #     the first 100 records of any query are served ("You are limited
+    #     to 100 results")
+    #   - the 'count' field is a placeholder for most queries (it reports
+    #     10000 for almost any email) and must not be trusted
+    #   - query variants of the same term (full email, local part,
+    #     local@domain) always return the same underlying records, so
+    #     nothing beyond that window exists on their side
+    # The email and its local part are queried and merged to be safe,
+    # records are de-duplicated, and only lines containing the searched
+    # local part are kept (the API also returns unrelated fuzzy matches,
+    # often whole domains, for a query).
     session = requests.session()
     if proxy:
         session.proxies = {'http': proxy, 'https': proxy}
@@ -65,6 +61,7 @@ def find_leaks_proxynova(email, proxy, number):
     needle = (local or email).lower()
 
     seen, lines = set(), []
+    fetched = 0
     for index, query in enumerate(queries):
         url = f"https://api.proxynova.com/comb?query={quote(query)}&start=0&limit=100"
         response = None
@@ -88,16 +85,20 @@ def find_leaks_proxynova(email, proxy, number):
         data = response.json()
         if index == 0:
             total = data.get("count", 0)
-            print(colored(f"[*] Found {total} different records in database (the API serves at most 100 per query)", "magenta"), end='')
-        for line in data.get("lines", []) or []:
+            print(colored(f"[*] The API reports {total} records (its count field is a placeholder for most queries - only actual matches are shown below)", "magenta"), end='')
+        page_lines = data.get("lines", []) or []
+        fetched += len(page_lines)
+        for line in page_lines:
             if needle in line.lower() and line not in seen:
                 seen.add(line)
                 lines.append(line)
         if len(lines) >= number:
             break
         time.sleep(0.3)
-    return lines[:number]
 
+    if not lines and fetched:
+        print(colored(f"\n[i] {fetched} raw records were returned but none contain '{local or email}' - this keyword has no records in their database", "cyan"))
+    return lines[:number]
 # Common passwords tried first when cracking a hash, before any wordlist.
 _COMMON_PASSWORDS = [
     "123456", "password", "123456789", "12345678", "12345", "qwerty",
