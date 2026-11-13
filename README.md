@@ -34,8 +34,8 @@ usage: LeakSearch.py [-h] [-d DATABASE] [-k KEYWORD] [-n NUMBER] [-o OUTPUT] [-p
 options:
   -h, --help            show this help message and exit
   -d DATABASE, --database DATABASE
-                        Online source (proxynova) or a local file (text or
-                        JSON) to scan
+                        Online source (proxynova, breachdirectory) or a local
+                        file (text or JSON) to scan
   -k KEYWORD, --keyword KEYWORD
                         Keyword (user/domain/pass) to search for leaks in the DB
   -n NUMBER, --number NUMBER
@@ -52,15 +52,27 @@ options:
 Every result contains an email (or username) and an **uncensored password in
 plaintext**. ProxyNova COMB records hold only the credential pair, so no
 breach site name or leak date is available for them; local database files
-return whatever columns the file itself contains.
+return whatever columns the file itself contains. BreachDirectory results
+include the breach site names in brackets (`user [Site1, Site2]:password`).
+
+### BreachDirectory
+
+BreachDirectory (via RapidAPI) is limited by its free plan to **10 requests
+per month**; a 429 response means the quota is spent until it resets. When
+their database knows the plaintext it is returned directly; otherwise the
+API returns an MD5/SHA-1/SHA-256 hash (optionally salted) which LeakSearch
+attempts to crack with a built-in common-password list plus an optional
+wordlist (set `LEAKSEARCH_WORDLIST` or place rockyou.txt at
+`~/wordlists/rockyou.txt`). Cracking is a dictionary attack, so hashes
+outside the wordlist are reported as `not cracked`.
 
 ### Notes on removed sources
 
 Other leak-search services were evaluated and removed because none of their
 routes (web or API) return uncensored credentials without a paid
-subscription: BreachDirectory, DeHashed, Leak-Lookup, IntelX, Snusbase,
-HIBP (counts only, no credentials) and pwndb (its onion service is offline
-and its v2 address is unsupported by current Tor). Optional API keys can be
+subscription: DeHashed, Leak-Lookup, IntelX, Snusbase, HIBP (counts only,
+no credentials) and pwndb (its onion service is offline and its v2 address
+is unsupported by current Tor). Optional API keys can be
 stored in the macOS Keychain under the `leaksearch` service name and are
 read at call time, never written to disk:
 

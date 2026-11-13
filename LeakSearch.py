@@ -6,6 +6,7 @@
 
 import os
 import json
+import hashlib
 import urllib3
 import requests
 import argparse
@@ -57,6 +58,130 @@ def find_leaks_proxynova(email, proxy, number):
         lines.extend(page_lines)
         start += len(page_lines)
     return lines[:number]
+
+# Common passwords tried first when cracking a hash, before any wordlist.
+_COMMON_PASSWORDS = [
+    "123456", "password", "123456789", "12345678", "12345", "qwerty",
+    "1234567890", "1234567", "111111", "123123", "abc123", "1234",
+    "password1", "iloveyou", "000000", "qwerty123", "1q2w3e", "aa123456789",
+    "monkey", "dragon", "letmein", "welcome", "admin", "login", "princess",
+    "solo", "qwertyuiop", "starwars", "passw0rd", "football", "baseball",
+    "sunshine", "master", "shadow", "superman", "batman", "michael",
+    "football1", "trustno1", "hello", "freedom", "whatever", "qazwsx",
+    "guest", "charlie", "thomas", "robert", "access", "love", "sex",
+    "secret", "summer", "winter", "spring", "autumn", "killer", "george",
+    "hunter", "soccer", "hockey", "anime", "internet", "service",
+    "canada", "hello123", "ranger", "daniel", "hannah", "jennifer",
+    "joshua", "bailey", "dylan", "jordan", "tigger", "purple", "cookie",
+    "naruto", "samsung", "google", "facebook", "pokemon", "chocolate",
+    "flower", "hottie", "loveme", "zaq12wsx", "1qaz2wsx", "asdfghjkl",
+    "qwerty12", "pass123", "pass1234", "root", "toor", "test", "abcd1234",
+]
+
+def _find_wordlist():
+    # Optional wordlist for cracking: LEAKSEARCH_WORDLIST env var first,
+    # then common rockyou locations. Returns None if none is available.
+    for path in (os.environ.get("LEAKSEARCH_WORDLIST"),
+                 "/usr/share/wordlists/rockyou.txt",
+                 "/opt/homebrew/share/wordlists/rockyou.txt",
+                 os.path.expanduser("~/wordlists/rockyou.txt")):
+        if path and os.path.exists(path):
+            return path
+    return None
+
+def _crack_hash(digest, hashtype, salt, wordlist):
+    # BreachDirectory returns hashes when the plaintext is not in their own
+    # database: MD5 / SHA-1 / SHA-256, optionally salted. Cracking is a
+    # dictionary attack: candidates are tried with and without the salt
+    # prepended/appended since the exact salt convention is not documented.
+    digest = digest.strip().lower()
+    hashtype = (hashtype or "").upper()
+
+    def matches(password):
+        candidates = (salt + password, password + salt) if salt else (password,)
+        for cand in candidates:
+            encoded = cand.encode("utf-8", "ignore")
+            if "MD5" in hashtype and hashlib.md5(encoded).hexdigest() == digest:
+                return password
+            if "SHA1" in hashtype and hashlib.sha1(encoded).hexdigest() == digest:
+                return password
+            if "SHA256" in hashtype and hashlib.sha256(encoded).hexdigest() == digest:
+                return password
+        return None
+
+    for password in _COMMON_PASSWORDS:
+        found = matches(password)
+        if found:
+            return found
+
+    if not wordlist:
+        return None
+
+    try:
+        with open(wordlist, "rb") as f:
+            for raw in f:
+                password = raw.decode("utf-8", "ignore").strip("\r\n")
+                if password:
+                    found = matches(password)
+                    if found:
+                        return found
+    except OSError:
+        pass
+    return None
+
+def find_leaks_breachdirectory(keyword, proxy, number):
+    # BreachDirectory over RapidAPI (endpoint and headers verified live from
+    # their RapidAPI listing): GET https://breachdirectory.p.rapidapi.com/
+    # with func=auto&term=<keyword>. The free BASIC plan allows 10 requests
+    # per month. Entries carry the plaintext password when their database
+    # knows it, otherwise a hash (MD5/SHA-1/SHA-256, optionally salted)
+    # which we attempt to crack with the embedded list + an optional
+    # wordlist, plus 'sources' naming the breaches each record came from.
+    api_key = get_key("breachdirectory_user")
+    if not api_key:
+        key_missing("breachdirectory_user")
+        return []
+
+    url = f"https://breachdirectory.p.rapidapi.com/?func=auto&term={quote(keyword)}"
+    session = requests.session()
+    session.headers.update({"x-rapidapi-key": api_key,
+                            "x-rapidapi-host": "breachdirectory.p.rapidapi.com"})
+    if proxy:
+        session.proxies = {'http': proxy, 'https': proxy}
+
+    response = session.get(url, timeout=60)
+    if response.status_code != 200:
+        print(colored(f"[!] Failed to fetch results from BreachDirectory. Status code: {response.status_code}\n"
+                      "    (the free plan allows 10 requests/month; a 429 means the quota is spent until it resets)\n", "red"))
+        return []
+
+    data = response.json()
+    if not data.get("success") or not data.get("results"):
+        return []
+
+    wordlist = _find_wordlist()
+    if not wordlist:
+        print(colored("[*] No wordlist found for hash cracking (set LEAKSEARCH_WORDLIST or place rockyou.txt at ~/wordlists/) - only the built-in common-password list will be tried\n", "magenta"))
+
+    results = []
+    for entry in data.get("results", [])[:number]:
+        ident = keyword
+        sources = entry.get("sources") or []
+        tag = f" [{', '.join(sources)}]" if sources else ""
+        password = entry.get("password")
+        if password and password.strip():
+            results.append(f"{ident}{tag}:{password}")
+        elif entry.get("hash"):
+            print(colored("[*] No plaintext in BreachDirectory's database for this record - attempting to crack the hash..", "yellow"))
+            cracked = _crack_hash(entry["hash"], entry.get("hash_type", ""),
+                                  entry.get("hash_salt") or "", wordlist)
+            if cracked:
+                results.append(f"{ident}{tag}:{cracked}")
+            else:
+                results.append(f"{ident}{tag} (hash):not cracked")
+        else:
+            results.append(f"{ident}{tag}:no password data returned")
+    return results
 
 def _scan_chunk(task):
     """Scan one byte range of a text database for keyword matches (worker)."""
@@ -163,6 +288,7 @@ def find_leaks_local_db(database, keyword, number):
 
 ONLINE_SOURCES = {
     'proxynova': find_leaks_proxynova,
+    'breachdirectory': find_leaks_breachdirectory,
 }
 
 def main(database, keyword, output=None, proxy=None, number=20):
@@ -230,7 +356,7 @@ if __name__ == '__main__':
     print(colored(banner, "blue"))
     print(colored(banner2, "green"))
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova) or local file")
+    parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova, breachdirectory) or local file")
     parser.add_argument("-k", "--keyword", help="Keyword (user/domain/pass) to search for leaks in the DB")
     parser.add_argument("-n", "--number", type=int, default=20, help="Number of results to show (default is 20)")
     parser.add_argument("-o", "--output", help="Save the results as json or txt into a file")
