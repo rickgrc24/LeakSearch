@@ -41,7 +41,7 @@ options:
   -n NUMBER, --number NUMBER
                         Number of results to show (default is 20)
   -o OUTPUT, --output OUTPUT
-                        Save the results as json or txt into a file
+                        Save the results as csv, json or txt into a file
   -p PROXY, --proxy PROXY
                         Set HTTP/S or SOCKS5 proxy (like http://localhost:8080)
 
@@ -51,9 +51,12 @@ options:
 
 Every result contains an email (or username) and an **uncensored password in
 plaintext**. ProxyNova COMB records hold only the credential pair, so no
-breach site name or leak date is available for them; local database files
-return whatever columns the file itself contains. BreachDirectory results
-include the breach site names in brackets (`user [Site1, Site2]:password`).
+breach site name or leak date is available for them, and the API serves at
+most the first 100 records of any query (a larger query drains the full
+email and its local part separately and merges the unique results); local
+database files return whatever columns the file itself contains.
+BreachDirectory results include the breach site names in brackets
+(`user [Site1, Site2]:password`).
 
 ### BreachDirectory
 

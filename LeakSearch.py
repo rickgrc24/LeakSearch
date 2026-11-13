@@ -5,6 +5,8 @@
 #============================#
 
 import os
+import time
+import csv
 import json
 import hashlib
 import urllib3
@@ -32,31 +34,55 @@ banner2 = r"""
 def find_leaks_proxynova(email, proxy, number):
     # Endpoint verified from proxynova.com's own frontend:
     # GET https://api.proxynova.com/comb?query=<term>&start=<offset>&limit=<n>
-    # (limit maxes at 100 per request; results are paged via start).
+    # Server-side rule (verified live): a request only succeeds while
+    # start + limit <= 100 - the API serves at most the first 100 records
+    # of any query ("You are limited to 100 results"), and windows differ
+    # between query variants. To drain more, the email, its local part and
+    # local@domain for every domain seen so far are queried in turn and the
+    # results are merged and de-duplicated.
+    # Endpoint verified from proxynova.com's own frontend:
+    # GET https://api.proxynova.com/comb?query=<term>&start=<offset>&limit=<n>
+    # Server-side rules (verified live): a request only succeeds while
+    # start + limit <= 100, so at most the first 100 records of any query
+    # are served ("You are limited to 100 results"); querying variants of
+    # the same term (full email, local part, local@domain) always returns
+    # the same underlying records, so nothing beyond that window exists on
+    # their side. The email and its local part are queried and merged to
+    # be safe, records are de-duplicated, and only lines containing the
+    # searched local part are kept (the API also returns unrelated fuzzy
+    # matches for a query).
     session = requests.session()
     if proxy:
         session.proxies = {'http': proxy, 'https': proxy}
 
     headers = {'User-Agent': 'curl'}
-    lines, start = [], 0
-    total_results = None
-    while len(lines) < number:
-        limit = min(number - len(lines), 100)
-        url = f"https://api.proxynova.com/comb?query={email}&start={start}&limit={limit}"
+    queries = [email]
+    local = None
+    if '@' in email:
+        local = email.split('@', 1)[0]
+        if local and local != email:
+            queries.append(local)
+    needle = (local or email).lower()
+
+    seen, lines = set(), []
+    for index, query in enumerate(queries):
+        url = f"https://api.proxynova.com/comb?query={quote(query)}&start=0&limit=100"
         response = session.get(url, headers=headers, verify=False)
         if response.status_code != 200:
-            if start == 0:
+            if index == 0:
                 print(colored(f"[!] Failed to fetch results from ProxyNova. Status code: {response.status_code}\n", "red"))
-            break
+            continue
         data = response.json()
-        if total_results is None:
-            total_results = data.get("count", 0)
-            print(colored(f"[*] Found {total_results} different records in database", "magenta"), end='')
-        page_lines = data.get("lines", [])
-        if not page_lines:
+        if index == 0:
+            total = data.get("count", 0)
+            print(colored(f"[*] Found {total} different records in database (the API serves at most 100 per query)", "magenta"), end='')
+        for line in data.get("lines", []) or []:
+            if needle in line.lower() and line not in seen:
+                seen.add(line)
+                lines.append(line)
+        if len(lines) >= number:
             break
-        lines.extend(page_lines)
-        start += len(page_lines)
+        time.sleep(0.3)
     return lines[:number]
 
 # Common passwords tried first when cracking a hash, before any wordlist.
@@ -329,19 +355,34 @@ def main(database, keyword, output=None, proxy=None, number=20):
 
 def print_results(results, output, number):
     print(colored(f"\n[-] Selecting the first {len(results)} results..", "blue"))
-    headers = ["Username@Domain", "Password"]
-    table_data = []
-
+    # Split on the FIRST colon only: passwords may themselves contain ':'
+    rows = []
     for line in results:
-        parts = line.split(":")
-        if len(parts) == 2:
-            username_domain, password = parts
-            table_data.append([username_domain, password])
+        ident, sep, password = line.partition(":")
+        if not sep:
+            continue
+        email, bracket, sites = ident.partition(" [")
+        rows.append([email.strip(), password, sites.rstrip("]") if bracket else ""])
+
+    has_sites = any(row[2] for row in rows)
+    if has_sites:
+        headers = ["Username@Domain", "Password", "Breach Site(s)"]
+        table_data = rows
+    else:
+        headers = ["Username@Domain", "Password"]
+        table_data = [row[:2] for row in rows]
 
     if output is not None:
-        if output.endswith('.json'):
+        extension = os.path.splitext(output)[1].lower()
+        if extension == '.json':
             with open(output, 'w') as json_file:
                 json.dump({"lines": results}, json_file, indent=2)
+                print(colored(f"[+] Data saved successfully in {output}!\n", "green"))
+        elif extension == '.csv':
+            with open(output, 'w', newline='', encoding='utf-8') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(["email", "password", "breach_sites"])
+                writer.writerows(rows)
                 print(colored(f"[+] Data saved successfully in {output}!\n", "green"))
         else:
             with open(output, 'w') as txt_file:
@@ -359,7 +400,7 @@ if __name__ == '__main__':
     parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova, breachdirectory) or local file")
     parser.add_argument("-k", "--keyword", help="Keyword (user/domain/pass) to search for leaks in the DB")
     parser.add_argument("-n", "--number", type=int, default=20, help="Number of results to show (default is 20)")
-    parser.add_argument("-o", "--output", help="Save the results as json or txt into a file")
+    parser.add_argument("-o", "--output", help="Save the results as csv, json or txt into a file")
     parser.add_argument("-p", "--proxy", help="Set HTTP/S proxy (like http://localhost:8080)")
     args = parser.parse_args()
 
