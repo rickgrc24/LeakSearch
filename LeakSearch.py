@@ -13,7 +13,7 @@ import urllib3
 import requests
 import argparse
 import subprocess
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from concurrent.futures import ProcessPoolExecutor
 from tabulate import tabulate
 from neotermcolor import colored
@@ -99,6 +99,60 @@ def find_leaks_proxynova(email, proxy, number):
     if not lines and fetched:
         print(colored(f"\n[i] {fetched} raw records were returned but none contain '{local or email}' - this keyword has no records in their database", "cyan"))
     return lines[:number]
+def find_leaks_checkleaked(keyword, proxy, number):
+    # LeakRadar (CheckLeaked.cc) free REST API, verified live 2026-11-13:
+    # POST https://api.checkleaked.cc/api/leakradar/search/email with the
+    # 'api-key' header set to the account's bot token (Api / Bot Links
+    # page, stored in the keychain under 'checkleaked_token'). The index
+    # covers leaks, combolists and stealer logs and is updated continuously
+    # (records added 2025-2026 were returned live), with plaintext
+    # passwords unlocked automatically on the free plan. Rate limit:
+    # 2 requests/second; pages of up to 50 via the 'page' query parameter.
+    api_key = get_key("checkleaked_token")
+    if not api_key:
+        key_missing("checkleaked_token")
+        return []
+
+    session = requests.session()
+    session.headers.update({"api-key": api_key, "Content-Type": "application/json",
+                            "Accept": "application/json"})
+    if proxy:
+        session.proxies = {'http': proxy, 'https': proxy}
+
+    results, page = [], 1
+    while len(results) < number:
+        response = session.post("https://api.checkleaked.cc/api/leakradar/search/email",
+                                json={"email": keyword},
+                                params={"page": page, "page_size": 50}, timeout=60)
+        if response.status_code != 200:
+            error = ""
+            try:
+                error = response.json().get("detail", "")
+            except ValueError:
+                pass
+            print(colored(f"[!] Failed to fetch results from CheckLeaked. Status code: {response.status_code} {error}\n", "red"))
+            break
+        data = response.json()
+        items = data.get("items") or []
+        if not items:
+            break
+        for item in items:
+            if len(results) >= number:
+                break
+            user = item.get("username") or keyword
+            url = item.get("url") or ""
+            host = urlsplit(url).netloc if url else "unknown"
+            password = item.get("password")
+            if item.get("unlocked") and password:
+                results.append(f"{user} [{host}]:{password}")
+            else:
+                results.append(f"{user} [{host}] (locked):password requires a paid CheckLeaked unlock")
+        if page * 50 >= data.get("total", 0):
+            break
+        page += 1
+        time.sleep(0.6)
+    return results[:number]
+
 # Common passwords tried first when cracking a hash, before any wordlist.
 _COMMON_PASSWORDS = [
     "123456", "password", "123456789", "12345678", "12345", "qwerty",
@@ -329,6 +383,7 @@ def find_leaks_local_db(database, keyword, number):
 ONLINE_SOURCES = {
     'proxynova': find_leaks_proxynova,
     'breachdirectory': find_leaks_breachdirectory,
+    'checkleaked': find_leaks_checkleaked,
 }
 
 def main(database, keyword, output=None, proxy=None, number=20):
@@ -424,7 +479,7 @@ if __name__ == '__main__':
     print(colored(banner, "blue"))
     print(colored(banner2, "green"))
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova, breachdirectory) or local file")
+    parser.add_argument("-d", "--database", default="proxynova", help="Online source (proxynova, breachdirectory, checkleaked) or local file")
     parser.add_argument("-k", "--keyword", help="Keyword (user/domain/pass) to search for leaks in the DB")
     parser.add_argument("-n", "--number", type=int, default=20, help="Number of results to show (default is 20)")
     parser.add_argument("-o", "--output", help="Save the results as csv, json or txt into a file")

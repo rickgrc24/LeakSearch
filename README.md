@@ -34,8 +34,8 @@ usage: LeakSearch.py [-h] [-d DATABASE] [-k KEYWORD] [-n NUMBER] [-o OUTPUT] [-p
 options:
   -h, --help            show this help message and exit
   -d DATABASE, --database DATABASE
-                        Online source (proxynova, breachdirectory) or a local
-                        file (text or JSON) to scan
+                        Online source (proxynova, breachdirectory,
+                        checkleaked) or a local file (text or JSON) to scan
   -k KEYWORD, --keyword KEYWORD
                         Keyword (user/domain/pass) to search for leaks in the DB
   -n NUMBER, --number NUMBER
@@ -56,7 +56,25 @@ most the first 100 records of any query (a larger query drains the full
 email and its local part separately and merges the unique results); local
 database files return whatever columns the file itself contains.
 BreachDirectory results include the breach site names in brackets
-(`user [Site1, Site2]:password`).
+(`user [Site1, Site2]:password`). CheckLeaked (LeakRadar) results include
+the site the credentials were stolen from in the Breach Site(s) column
+(`user [site.com]:password`) and the index is updated continuously with
+recent (2025-2026) stealer-log and combolist data.
+
+### CheckLeaked (LeakRadar)
+
+CheckLeaked's free REST API (`api.checkleaked.cc/api/leakradar/search/email`)
+requires the account's **bot token** (from the Api / Bot Links page of a
+free account at checkleaked.cc). Store it in the macOS Keychain and it is
+read at call time, never written to disk:
+
+```
+security add-generic-password -a checkleaked_token -s leaksearch -w '<bot token>'
+```
+
+Records found on the free plan are unlocked automatically (plaintext
+password included). Rate limit is 2 requests/second; results are paginated
+50 per page.
 
 ### BreachDirectory
 
