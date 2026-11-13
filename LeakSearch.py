@@ -67,10 +67,23 @@ def find_leaks_proxynova(email, proxy, number):
     seen, lines = set(), []
     for index, query in enumerate(queries):
         url = f"https://api.proxynova.com/comb?query={quote(query)}&start=0&limit=100"
-        response = session.get(url, headers=headers, verify=False)
-        if response.status_code != 200:
-            if index == 0:
-                print(colored(f"[!] Failed to fetch results from ProxyNova. Status code: {response.status_code}\n", "red"))
+        response = None
+        for attempt in (1, 2): # one retry: the API briefly throttles bursts
+            try:
+                response = session.get(url, headers=headers, verify=False, timeout=60)
+            except requests.exceptions.RequestException as e:
+                response = None
+                if attempt == 1:
+                    print(colored(f"[!] ProxyNova connection error ({type(e).__name__}), retrying once..\n", "red"))
+                    time.sleep(5)
+                    continue
+            if response is not None and response.status_code == 200:
+                break
+            if attempt == 1:
+                print(colored(f"[!] ProxyNova returned {response.status_code if response is not None else 'no response'} (the API briefly throttles bursts), retrying once..\n", "red"))
+                time.sleep(5)
+        if response is None or response.status_code != 200:
+            print(colored(f"[!] Failed to fetch results from ProxyNova for query '{query}'. Status code: {response.status_code if response is not None else 'no response'}\n", "red"))
             continue
         data = response.json()
         if index == 0:
@@ -339,21 +352,34 @@ def main(database, keyword, output=None, proxy=None, number=20):
             except Exception as e:
                 print(colored(f"[!] Error searching {name}: {e}\n", "red"))
 
-        if not results:
-            print(colored(f"\n[!] No leaks found!\n", "red"))
-        else:
-            print_results(results, output, number)
+        print_results(results, output, number)
 
     else:
         print(colored(f"[>] Searching for {keyword} leaks in {database}..", "yellow"))
         results = find_leaks_local_db(database.strip(), keyword, number)
 
-        if not results:
-            print(colored(f"\n[!] No leaks found in {database}!\n", "red"))
-        else:
-            print_results(results, output, number)
+        print_results(results, output, number, f"Searching for {keyword} leaks in {database}")
 
-def print_results(results, output, number):
+def print_results(results, output, number, context=None):
+    if not results:
+        # Even with no leaks, write the requested output file (empty) so
+        # the artifact the user asked for always exists
+        if output:
+            extension = os.path.splitext(output)[1].lower()
+            if extension == '.csv':
+                with open(output, 'w', newline='', encoding='utf-8') as csv_file:
+                    csv.writer(csv_file).writerow(["email", "password", "breach_sites"])
+            elif extension == '.json':
+                with open(output, 'w') as json_file:
+                    json.dump({"lines": []}, json_file, indent=2)
+            else:
+                with open(output, 'w') as txt_file:
+                    txt_file.write("")
+            print(colored(f"\n[!] No leaks found! (empty {output} saved)\n", "red"))
+        else:
+            print(colored(f"\n[!] No leaks found!\n", "red"))
+        return
+
     print(colored(f"\n[-] Selecting the first {len(results)} results..", "blue"))
     # Split on the FIRST colon only: passwords may themselves contain ':'
     rows = []
