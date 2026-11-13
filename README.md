@@ -61,6 +61,23 @@ the site the credentials were stolen from in the Breach Site(s) column
 (`user [site.com]:password`) and the index is updated continuously with
 recent (2025-2026) stealer-log and combolist data.
 
+### Testing found pairs against a site
+
+`check_passwords.py` tests whether the username+password pairs LeakSearch
+returns are still live on a site you specify (intended for auditing your
+own accounts). It reads a LeakSearch export and submits each pair to the
+site's real login form:
+
+```
+python3 check_passwords.py --url https://example.com/login --leaks leaks.csv
+```
+
+Detection is heuristic (baseline failed-login comparison + form
+disappearance after submit): results are `WORKS`, `failed`, or
+`unclear (verify manually)`. JavaScript-only login pages can't be tested.
+Attempts are rate-limited (10 s apart by default, 20 max) — see
+`--delay` and `--max`.
+
 ### CheckLeaked (LeakRadar)
 
 CheckLeaked's free REST API (`api.checkleaked.cc/api/leakradar/search/email`)
