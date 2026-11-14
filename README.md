@@ -72,11 +72,26 @@ site's real login form:
 python3 check_passwords.py --url https://example.com/login --leaks leaks.csv
 ```
 
-Detection is heuristic (baseline failed-login comparison + form
+Detection is heuristic (baseline failed-login comparison + form/field
 disappearance after submit): results are `WORKS`, `failed`, or
-`unclear (verify manually)`. JavaScript-only login pages can't be tested.
-Attempts are rate-limited (10 s apart by default, 20 max) — see
-`--delay` and `--max`.
+`unclear (verify manually)`. Attempts are rate-limited (10 s apart by
+default, 20 max) — see `--delay` and `--max`.
+
+For sites whose login page is JavaScript-driven (no HTML `<form>`), the
+tester automatically falls back to driving Safari (macOS): one browser
+window is opened on the site, every pair is submitted in the real
+interface against a wrong-password baseline, and the window is closed
+afterwards. With `--private` that window is a **new private window**,
+so the attempts share no cookies with your normal Safari session and
+nothing is saved to it once the window closes:
+
+```
+python3 check_passwords.py --url https://example.com/login --leaks leaks.csv --private
+```
+
+Attempts can also be routed through a proxy such as Tor with
+`--proxy socks5h://127.0.0.1:9050` (requests-based modes only; the
+Safari fallback uses Safari's own networking).
 
 ### CheckLeaked (LeakRadar)
 
