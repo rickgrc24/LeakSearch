@@ -93,6 +93,16 @@ Attempts can also be routed through a proxy such as Tor with
 `--proxy socks5h://127.0.0.1:9050` (requests-based modes only; the
 Safari fallback uses Safari's own networking).
 
+#### Full inventory (`--inventory`)
+
+By default the run stops at the first live pair. With `--inventory` it
+tests **every** pair and reports the complete list still live. Each
+attempt uses a fresh, isolated session (fresh private window per
+attempt in the Safari fallback — note Safari shares one cookie jar
+across private windows, so close any other private windows first), so
+one success never contaminates later attempts. Save the hits with
+`--out hits.csv` (email,password,breach_sites). Requires Python 3.12+.
+
 ### CheckLeaked (LeakRadar)
 
 CheckLeaked's free REST API (`api.checkleaked.cc/api/leakradar/search/email`)
