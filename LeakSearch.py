@@ -67,12 +67,24 @@ def find_leaks_proxynova(email, proxy, number):
         session.proxies = {'http': proxy, 'https': proxy}
 
     headers = {'User-Agent': 'curl'}
+    # Pagination is impossible on this endpoint (verified live): start=100
+    # answers HTTP 400 "You are limited to 100 results", and offsets inside
+    # the window only re-serve subsets of the same 100 records. The one real
+    # way to reach more records is that DIFFERENT query terms open different
+    # fuzzy windows (verified live: 'coinbase' vs 'coinbase.com' vs
+    # 'www.coinbase.com' return mostly disjoint sets), so each search sweeps
+    # a few query variants and merges them.
     queries = [email]
     local = None
     if '@' in email:
         local = email.split('@', 1)[0]
         if local and local != email:
             queries.append(local)
+    elif '.' in email:
+        labels = email.split('.')
+        if len(labels) >= 2:
+            queries.append('www.' + email)      # 'www.coinbase.com'
+            queries.append('.'.join(labels[:-1]))  # 'coinbase' (TLD stripped)
     needle = (local or email).lower()
 
     seen, lines = set(), []
