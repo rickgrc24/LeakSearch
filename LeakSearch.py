@@ -31,19 +31,42 @@ banner2 = r"""
   ------------------- by @JoelGMSec -------------------
   """
 
+def _domain_like(part):
+    """Loose domain-shape test: dotted, no '@' or spaces, and the text after
+    the last dot is a short alphabetic label (a TLD). 'coinbase.com' and
+    'hotspot.alwayson.co.za' match; passwords like 'z.!', 'j0n.m4c.ad$$' or
+    '4.59257045925705e+20buy' do not."""
+    if "@" in part or " " in part or "." not in part:
+        return False
+    tld = part.rsplit(".", 1)[-1]
+    return tld.isalpha() and 2 <= len(tld) <= 10
+
+
 def _normalize_comb_line(line):
-    """COMB lines are 'email:password', but the corpus also contains
-    stealer-log-style records in 'domain:email:password' form (three or more
-    colon-separated fields where the first field is a domain, not an email).
-    Left raw, such a line wrecks the column layout: the domain lands in the
-    email column and 'email:password' in the password column. Normalize every
-    line to 'email:password' or 'email [domain]:password' (the record format
-    print_results already understands) so the terminal table and the CSV keep
-    their columns aligned - and the stolen-from domain fills breach_sites."""
+    """COMB lines are usually 'email:password', but the corpus also contains
+    stealer-log-style records whose three fields appear in varying orders:
+    'domain:email:password', 'password:domain:email', 'url:user:pass', ...
+    Left raw, any of them wrecks the column layout. Instead of assuming
+    positions, identify the email by its '@', the site by domain shape, and
+    treat everything left over as the password, then emit the record format
+    print_results understands: 'email:password' or 'email [site]:password'.
+    Ambiguous lines (no clear email, or several domain-shaped fields) are
+    left untouched and fall back to the first-colon split."""
     parts = line.split(":")
-    if len(parts) >= 3 and "@" not in parts[0] and (("." in parts[0]) or ("@" in parts[1])):
-        email, password, site = parts[1], ":".join(parts[2:]), parts[0]
-        return f"{email} [{site}]:{password}"
+    if len(parts) < 3:
+        return line
+    at_idx = [i for i, p in enumerate(parts) if "@" in p]
+    domain_idx = [i for i, p in enumerate(parts) if _domain_like(p)]
+    if len(at_idx) == 1:
+        candidates = [i for i in domain_idx if i != at_idx[0]]
+        if len(candidates) == 1:
+            email, site = parts[at_idx[0]], parts[candidates[0]]
+            password = ":".join(p for i, p in enumerate(parts) if i not in (at_idx[0], candidates[0]))
+            return f"{email} [{site}]:{password}"
+        return line
+    if not at_idx and len(parts) == 3 and domain_idx == [0]:
+        # 'url:user:pass' with a username that carries no '@'
+        return f"{parts[1]} [{parts[0]}]:{parts[2]}"
     return line
 
 def find_leaks_proxynova(email, proxy, number):
