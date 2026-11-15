@@ -31,6 +31,21 @@ banner2 = r"""
   ------------------- by @JoelGMSec -------------------
   """
 
+def _normalize_comb_line(line):
+    """COMB lines are 'email:password', but the corpus also contains
+    stealer-log-style records in 'domain:email:password' form (three or more
+    colon-separated fields where the first field is a domain, not an email).
+    Left raw, such a line wrecks the column layout: the domain lands in the
+    email column and 'email:password' in the password column. Normalize every
+    line to 'email:password' or 'email [domain]:password' (the record format
+    print_results already understands) so the terminal table and the CSV keep
+    their columns aligned - and the stolen-from domain fills breach_sites."""
+    parts = line.split(":")
+    if len(parts) >= 3 and "@" not in parts[0] and (("." in parts[0]) or ("@" in parts[1])):
+        email, password, site = parts[1], ":".join(parts[2:]), parts[0]
+        return f"{email} [{site}]:{password}"
+    return line
+
 def find_leaks_proxynova(email, proxy, number):
     # Endpoint verified from proxynova.com's own frontend:
     # GET https://api.proxynova.com/comb?query=<term>&start=<offset>&limit=<n>
@@ -91,7 +106,7 @@ def find_leaks_proxynova(email, proxy, number):
         for line in page_lines:
             if needle in line.lower() and line not in seen:
                 seen.add(line)
-                lines.append(line)
+                lines.append(_normalize_comb_line(line))
         if len(lines) >= number:
             break
         time.sleep(0.3)
